@@ -32,9 +32,29 @@ This is still a spike. There is no LuCI page, init script, or UCI config yet. Th
 /usr/libexec/grokbuild/spike-ttyd.sh stop
 ```
 
-It listens on `https://100.104.188.37:7682/`, on `tailscale0` only. The certificate is the router's self-signed uhttpd one, so the browser warns once.
+It is reachable from the LAN and over Tailscale, never from the WAN:
 
-`start` runs a small supervisor loop. If ttyd exits, for example because restarting tailscale removed `tailscale0`, the loop waits for `tailscale0` to have an address again and starts ttyd within a few seconds. The page reconnects by itself.
+- LAN: `https://192.168.1.1:7682/`
+- Tailscale: `https://100.104.188.37:7682/`
+
+There is one ttyd per interface (`br-lan` and `tailscale0`), because `ttyd -i` binds one interface. Both serve the same page with the same credential and attach to the same tmux session, so a phone on the LAN and a laptop on Tailscale see the same grok. The certificate is the router's self-signed uhttpd one, so the browser warns once.
+
+`start` runs a small supervisor loop for each interface. If a ttyd exits, for example because restarting tailscale removed `tailscale0`, its loop waits for the interface to have an address again and starts ttyd within a few seconds. The page reconnects by itself.
+
+## Firewall
+
+The `lan` zone's input policy is ACCEPT, so 7682 needs no rule from the LAN. As a second layer behind the per-interface binding, one firewall4 rule rejects 7682 from the WAN:
+
+```
+config rule
+	option name 'Block-GrokBuild-WAN'
+	option src 'wan'
+	option proto 'tcp'
+	option dest_port '7682'
+	option target 'REJECT'
+```
+
+On this router it was added by hand with `uci` and `/etc/init.d/firewall reload`. In the LuCI phase the package's uci-defaults script will create it, only if no rule with that name exists.
 
 Stopping ttyd does not stop grok. To end the session too:
 

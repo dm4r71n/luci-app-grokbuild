@@ -44,6 +44,9 @@ tmux -L grokbuild capture-pane -p -t grok
 - That uhttpd certificate is self-signed, has no subjectAltName, and expired on 2026-04-02.
 - ttyd takes the credential only as `-c user:pass`, so it is visible in `ps` to anyone who can run `ps` on the router. The supervisor reads it from the file, so only the ttyd line shows it. At log level notice and above (`-d 7`) ttyd also writes it to syslog in base64. Keep `-d 3`. Moving to `-H` (an auth header from a reverse proxy, for example uhttpd or LuCI) would take it off the command line.
 - `GET /token` returns the base64 credential to any client that already passed basic auth. That is how the page opens the websocket.
+- `-i` binds one interface, so `spike-ttyd.sh` runs two ttyd processes on 7682: `-i br-lan` (192.168.1.1) and `-i tailscale0` (100.104.188.37). Each has its own supervisor and pid file, `/var/run/grokbuild-ttyd-<iface>.pid`. Each browser connection is one more tmux client on the same session; tmux sizes the window to the most recently active client.
+- Binding to `0.0.0.0` and relying on the firewall was rejected. Per-interface binding keeps 7682 off `eth0` even if the firewall is stopped, and `Block-GrokBuild-WAN` (see the README) covers the WAN if a later change binds wider. ttyd is started without `-6`, so it listens on IPv4 only; the rule has no `family`, so it covers IPv6 too.
+- The rule is added by hand for now. The LuCI package will add it in `root/etc/uci-defaults/` with `uci add firewall rule` guarded by a name check, then `uci commit firewall`. It will not reload the firewall from uci-defaults; the first boot or `/etc/init.d/firewall reload` picks it up.
 - Restarting tailscale deletes `tailscale0` and ttyd exits. Binding to the IP instead would not help: the address goes away with the interface, and ttyd cannot bind it until it is back. The supervisor in `spike-ttyd.sh` waits for an IPv4 address on `tailscale0` and starts ttyd again. The procd init script will replace it with `respawn`, plus a hotplug or `ubus` trigger on the interface.
 
 ## Terminal page
@@ -101,5 +104,5 @@ Chromium's device-scale emulation (Playwright's `deviceScaleFactor`) does not sc
 ## Plan
 
 - Services > Grok Build in LuCI, embedding or linking the page.
-- procd init script and UCI config in place of `spike-ttyd.sh`.
-- LAN and Tailscale only.
+- procd init script and UCI config in place of `spike-ttyd.sh`, with one instance per listed interface.
+- LAN and Tailscale only, with `Block-GrokBuild-WAN` from uci-defaults.
