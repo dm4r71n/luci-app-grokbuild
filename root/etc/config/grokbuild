@@ -1,0 +1,16 @@
+config grokbuild 'main'
+	option enabled '1'
+	# Public TLS port. Block-GrokBuild-WAN rejects it from the wan zone.
+	option port '7682'
+	# Addresses stunnel listens on. 0.0.0.0 covers the LAN and tailscale0
+	# whenever it comes up; the firewall rule keeps the WAN out.
+	list listen '0.0.0.0'
+	# Refuse clients outside RFC 1918, CGNAT/Tailscale, ULA, link-local.
+	option private_only '1'
+	# Internal: stunnel hands connections to the auth proxy on 127.0.0.1 here.
+	option proxy_port '7683'
+	option workdir '/root/grok-work'
+	option command '/root/.grok/bin/grok'
+	# PEM or DER; empty means uhttpd's certificate and key.
+	option cert ''
+	option key ''

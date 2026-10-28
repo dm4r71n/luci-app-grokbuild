@@ -1,0 +1,45 @@
+#!/bin/sh
+# Grok Build first-install setup. Safe to run more than once.
+
+# Config section, unless one exists already.
+[ -n "$(uci -q get grokbuild.main)" ] || uci -q batch <<-EOC
+	set grokbuild.main=grokbuild
+	set grokbuild.main.enabled='1'
+	set grokbuild.main.port='7682'
+	add_list grokbuild.main.listen='0.0.0.0'
+	set grokbuild.main.private_only='1'
+	set grokbuild.main.proxy_port='7683'
+	set grokbuild.main.workdir='/root/grok-work'
+	set grokbuild.main.command='/root/.grok/bin/grok'
+	commit grokbuild
+EOC
+
+# Reject the terminal port from the WAN, only if no rule of that name exists.
+# The firewall is not reloaded here; boot or `/etc/init.d/firewall reload`
+# applies it.
+if ! uci -q show firewall | grep -q "\.name='Block-GrokBuild-WAN'$"; then
+	port=$(uci -q get grokbuild.main.port)
+	uci -q batch <<-EOC
+		add firewall rule
+		set firewall.@rule[-1].name='Block-GrokBuild-WAN'
+		set firewall.@rule[-1].src='wan'
+		set firewall.@rule[-1].proto='tcp'
+		set firewall.@rule[-1].dest_port='${port:-7682}'
+		set firewall.@rule[-1].target='REJECT'
+		commit firewall
+	EOC
+fi
+
+# The stunnel package enables a 'dummy' example service on localhost:6000.
+# Grok Build runs its own stunnel from procd, so turn the stock one off when
+# the example is all it has.
+if [ -x /etc/init.d/stunnel ] &&
+   [ "$(uci -q show stunnel | grep -c '=service$')" = 1 ] &&
+   [ "$(uci -q get stunnel.dummy)" = service ]; then
+	/etc/init.d/stunnel stop >/dev/null 2>&1
+	/etc/init.d/stunnel disable
+fi
+
+mkdir -p "$(uci -q get grokbuild.main.workdir || echo /root/grok-work)"
+[ -x /etc/init.d/grokbuild ] && /etc/init.d/grokbuild enable
+exit 0
