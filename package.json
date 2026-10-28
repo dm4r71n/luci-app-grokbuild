@@ -1,0 +1,19 @@
+{
+  "name": "luci-app-grokbuild-terminal",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "test": "node --test tests/unit/",
+    "e2e": "node tests/e2e/phone.mjs"
+  },
+  "devDependencies": {
+    "@xterm/addon-canvas": "^0.7.0",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-unicode11": "^0.8.0",
+    "@xterm/addon-webgl": "^0.18.0",
+    "@xterm/xterm": "^5.5.0",
+    "esbuild": "^0.28.2",
+    "playwright": "^1.64.1"
+  }
+}

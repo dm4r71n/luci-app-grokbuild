@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#141822">
+<meta name="color-scheme" content="dark">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' wss: ws:; img-src data:; font-src data:">
+<title>Grok Build</title>
+<link rel="icon" href="data:,">
+<style>/*CSS*/</style>
+</head>
+<body>
+<div id="app">
+	<div id="term"></div>
+	<div id="bar" role="toolbar" aria-label="Keys">
+		<button data-k="kbd" aria-label="Show or hide keyboard">⌨</button>
+		<button data-k="esc">Esc</button>
+		<button data-k="tab">Tab</button>
+		<button data-k="stab" class="wide">⇧Tab</button>
+		<button data-k="ctrl">Ctrl</button>
+		<button data-k="alt">Alt</button>
+		<span class="sep"></span>
+		<button data-k="left" aria-label="Left">←</button>
+		<button data-k="up" aria-label="Up">↑</button>
+		<button data-k="down" aria-label="Down">↓</button>
+		<button data-k="right" aria-label="Right">→</button>
+		<button data-k="enter" aria-label="Enter">⏎</button>
+		<span class="sep"></span>
+		<button data-k="pgup" class="wide">PgUp</button>
+		<button data-k="pgdn" class="wide">PgDn</button>
+		<button data-k="home" class="wide">Home</button>
+		<button data-k="end">End</button>
+		<span class="sep"></span>
+		<button data-k="font-" aria-label="Smaller text">A−</button>
+		<button data-k="font+" aria-label="Larger text">A+</button>
+		<button data-k="copy" class="wide">Copy</button>
+		<button data-k="paste" class="wide">Paste</button>
+		<button data-k="hide" aria-label="Hide key bar">▾</button>
+	</div>
+	<button id="show-bar" aria-label="Show key bar">⌨ ▴</button>
+	<div id="pill" class="pill" hidden></div>
+	<div id="toast" hidden></div>
+	<div id="sheet" hidden>
+		<textarea id="sheet-text" readonly spellcheck="false" aria-label="Screen text"></textarea>
+		<div class="sheet-actions">
+			<span class="sheet-hint">Long-press to select.</span>
+			<button id="sheet-close">Close</button>
+			<button id="sheet-copy" class="primary">Copy</button>
+		</div>
+	</div>
+</div>
+<script>/*JS*/</script>
+</body>
+</html>
