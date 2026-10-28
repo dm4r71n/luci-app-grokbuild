@@ -2,22 +2,25 @@
 
 ## Layout
 
-Same as `luci-app-netusage`: `root/` holds files at their install paths, `htdocs/` will hold the LuCI view, and `tests/` holds tests. The terminal page source is in `src/terminal/`, and `tools/build.mjs` bundles it into `root/usr/share/grokbuild/www/index.html`. The built file is committed, because the router and the OpenWrt build have no Node.
+Same as `luci-app-netusage`: `root/` holds files at their install paths, `htdocs/` holds the LuCI views, and `tests/` holds tests. The terminal page source is in `src/terminal/`, and `tools/build.mjs` bundles it into `root/usr/share/grokbuild/www/index.html`. The built file is committed, because the router and the OpenWrt build have no Node.
 
 ```sh
 npm ci
 npm run build      # src/terminal -> root/usr/share/grokbuild/www/index.html
 npm test           # unit tests, node --test
-npm run e2e        # Pixel 7 in headless Chromium against the live test ttyd
+npm run test:router  # ucode tests of proxy-lib.uc and ctl.sh, run on the router over ssh
+npm run e2e        # auth.mjs, luci.mjs, phone.mjs against the live router (OPENWRT_PASSWORD)
 ```
 
-Copy to the router:
+Copy to the router (the config is left alone; `/etc/config/grokbuild` is a conffile):
 
 ```sh
-tar -C root -cf - . | ssh root@router 'tar -C / -xf -'
+tar -C root --exclude=./etc/config/grokbuild -cf - . | ssh root@router 'tar -C / -xf -'
+tar -C htdocs -cf - . | ssh root@router 'tar -C /www -xf -'
+ssh root@router 'rm -f /tmp/luci-indexcache*; rm -rf /tmp/luci-modulecache; killall -HUP rpcd; /etc/init.d/grokbuild restart'
 ```
 
-A new page takes effect on the next page load; ttyd reads the file per request. Changes to `spike-ttyd.sh` need `spike-ttyd.sh restart`.
+A new page takes effect on the next page load; the proxy reads the file per request. The rpcd plugin and ACL need `killall -HUP rpcd`; proxy changes need a service restart.
 
 ## tmux
 
@@ -38,16 +41,50 @@ tmux -L grokbuild list-panes -F '#{pane_current_command} alt=#{alternate_on} mou
 tmux -L grokbuild capture-pane -p -t grok
 ```
 
-## ttyd
+## Service and auth
 
-- uhttpd stores `/etc/uhttpd.crt` and `/etc/uhttpd.key` in DER. libwebsockets only reads PEM and fails with `PEM routines::no start line`. `spike-ttyd.sh` converts them into `/etc/grokbuild/`.
-- That uhttpd certificate is self-signed, has no subjectAltName, and expired on 2026-04-02.
-- ttyd takes the credential only as `-c user:pass`, so it is visible in `ps` to anyone who can run `ps` on the router. The supervisor reads it from the file, so only the ttyd line shows it. At log level notice and above (`-d 7`) ttyd also writes it to syslog in base64. Keep `-d 3`. Moving to `-H` (an auth header from a reverse proxy, for example uhttpd or LuCI) would take it off the command line.
-- `GET /token` returns the base64 credential to any client that already passed basic auth. That is how the page opens the websocket.
-- `-i` binds one interface, so `spike-ttyd.sh` runs two ttyd processes on 7682: `-i br-lan` (192.168.1.1) and `-i tailscale0` (100.104.188.37). Each has its own supervisor and pid file, `/var/run/grokbuild-ttyd-<iface>.pid`. Each browser connection is one more tmux client on the same session; tmux sizes the window to the most recently active client.
-- Binding to `0.0.0.0` and relying on the firewall was rejected. Per-interface binding keeps 7682 off `eth0` even if the firewall is stopped, and `Block-GrokBuild-WAN` (see the README) covers the WAN if a later change binds wider. ttyd is started without `-6`, so it listens on IPv4 only; the rule has no `family`, so it covers IPv6 too.
-- The rule is added by hand for now. The LuCI package will add it in `root/etc/uci-defaults/` with `uci add firewall rule` guarded by a name check, then `uci commit firewall`. It will not reload the firewall from uci-defaults; the first boot or `/etc/init.d/firewall reload` picks it up.
-- Restarting tailscale deletes `tailscale0` and ttyd exits. Binding to the IP instead would not help: the address goes away with the interface, and ttyd cannot bind it until it is back. The supervisor in `spike-ttyd.sh` waits for an IPv4 address on `tailscale0` and starts ttyd again. The procd init script will replace it with `respawn`, plus a hotplug or `ubus` trigger on the interface.
+### Why stunnel and a ucode proxy
+
+ttyd can only authenticate with `-c user:pass`, which puts the password on its command line and in syslog at notice level, or with `-H <header>`, which trusts whatever reverse proxy is in front of it. uhttpd cannot proxy websockets. So something has to terminate TLS, check the LuCI session, and relay the websocket.
+
+- nginx (`nginx-ssl`, 832 KiB) ships a uci-defaults that takes over ports 80 and 443 from uhttpd, and its session check would need `auth_request` plus a backend. haproxy is several MiB.
+- stunnel (220 KiB, uses the OpenSSL already installed for `openssl-util`) does TLS and PROXY v1 and nothing else.
+- The session check and the relay are about 300 lines of ucode (`proxy.uc`) using `socket`, `uloop`, and `ubus`, all already installed for LuCI.
+
+Each piece runs as a procd instance with respawn.
+
+### Flow
+
+1. LuCI view calls `grokbuild.ticket` over `/ubus`. uhttpd-mod-ubus adds `ubus_rpc_session` to the call, and the rpcd ucode plugin receives it in `req.args`. The ACL requires write on `luci-app-grokbuild`. The plugin writes `{sid, expires}` to `/var/run/grokbuild/tickets/<48 hex>` (0700 directory) and purges old tickets.
+2. The view frames `https://<same host>:<port>/#t=<ticket>`. The page removes the fragment with `history.replaceState`, then `POST /auth` with `X-GrokBuild-Ticket`. The proxy reads and deletes the ticket file, checks `expires`, checks the session, and answers `{"key": <sid>}`.
+3. The page keeps the key in `sessionStorage` and sends it as `X-GrokBuild-Key` on `/token` and as `?k=` on `/ws` (a websocket cannot carry headers). No cookies, so third-party cookie rules for the cross-port frame do not matter.
+4. For `/ws` the proxy checks `Upgrade`, that `Origin` is `https://` + `Host`, and the session, then connects to `ttyd.sock` and sends the request head without the query, without any client copy of `X-GrokBuild-User`, `X-GrokBuild-Key`, or `X-GrokBuild-Ticket`, and with `X-GrokBuild-User: <LuCI user>`. After that it relays bytes both ways with backpressure.
+5. Every 60 s the proxy rechecks each open websocket's session and closes it if the session is gone. `session access` also refreshes the session's idle timeout, so an open terminal keeps that LuCI login alive.
+
+The session check is `ubus call session access {ubus_rpc_session, scope: "access-group", object: "luci-app-grokbuild", function: "write"}`. A session made by `session login` over `/ubus` passes it, but LuCI's logout only destroys sessions that LuCI created through its login form; `auth.mjs` logs in through the form for that reason.
+
+The proxy answers `/`, `/auth`, and `/token` itself and closes the connection after each response (`Connection: close`), so a second request on a kept-alive connection can never reach ttyd unchecked. Only websocket upgrades reach ttyd. `/` is served without a session; it is the static page. Its response has `Content-Security-Policy: frame-ancestors` for the same host name on any port, so only LuCI on this router can frame it.
+
+### stunnel details
+
+- stunnel 5.75 treats `POLLHUP` on a Unix socket as end of input and drops what it has not read yet, which cut off the 516 KiB page. It also logs a `getnameinfo` error for every Unix connection. So the proxy listens on `127.0.0.1:7683`. Loopback is fine here: the proxy is the authentication, and ttyd stays on a 0700 Unix socket.
+- The proxy ends a connection with `shutdown(SHUT_WR)`, reads until stunnel closes, then closes (5 s cap). Closing with unread input would make the kernel reset the connection and drop queued output.
+- `protocol = proxy` makes stunnel send `PROXY TCP4 <client> <server> <sport> <dport>` first. A client cannot forge it; its own `PROXY` line arrives as the request line and gets 400.
+- `debug = 4` (warnings). At higher levels stunnel logs every connection.
+- uhttpd stores `/etc/uhttpd.crt` and `/etc/uhttpd.key` in DER. OpenSSL in stunnel reads PEM, so the init script converts them into `/etc/grokbuild/`. That certificate is self-signed, has no subjectAltName, and expired on 2026-04-02.
+
+### ttyd
+
+- `ttyd -i /var/run/grokbuild/ttyd.sock -H X-GrokBuild-User -W -I index.html -d 3 attach.sh`. A `-i` path ending in `.sock` makes ttyd listen on a Unix socket. With `-H` and no `-c`, the websocket's `AuthToken` is not checked; the page sends an empty one.
+- ttyd's own `/token` is never reached; the proxy answers `/token` with `{"token": ""}` after the session check, and the page uses it as its auth probe (401 means get a new ticket).
+
+### tailscale0
+
+Restarting tailscale deletes `tailscale0`. stunnel listens on `0.0.0.0`, so it does not care when tailscale0 comes or goes, and nothing in the service binds to it. The WAN is kept out by `Block-GrokBuild-WAN`, by `private_only` in the proxy, and by the LuCI login.
+
+### Firewall rule
+
+`/etc/uci-defaults/90_luci-app-grokbuild` adds `Block-GrokBuild-WAN` with `uci add firewall rule`, guarded by a name check, then `uci commit firewall`. It does not reload the firewall; the first boot or `/etc/init.d/firewall reload` picks it up. The rule has no `family`, so it covers IPv4 and IPv6.
 
 ## Terminal page
 
@@ -55,12 +92,12 @@ tmux -L grokbuild capture-pane -p -t grok
 
 The page is xterm.js 5.5 with the fit, WebGL, canvas, and Unicode 11 addons, bundled with esbuild into one HTML file, and it speaks ttyd's protocol itself. ttyd's own frontend is a minified Preact bundle; patching it for touch and a key bar means editing generated code that changes with each ttyd release. ttyd's protocol is small and stable, so owning the page is less fragile:
 
-- Upgrade: basic auth is checked on the websocket request too (`check_auth` in `protocol.c`); the browser sends the cached credential for same-origin requests.
-- First message: `{"AuthToken": <GET /token>, "columns", "rows"}`.
+- Upgrade: `GET /ws?k=<key>` with subprotocol `tty`; the proxy checks the key (see Service and auth).
+- First message: `{"AuthToken": "", "columns", "rows"}`. ttyd runs without `-c`, so the token is not checked.
 - Client to server: `0` + input, `1` + `{"columns","rows"}`, `2` pause, `3` resume.
 - Server to client: `0` + output, `1` + title, `2` + preferences (ignored).
 
-ttyd serves only the index, `/token`, and `/ws`, so CSS and JS are inlined. The page sets a CSP with `default-src 'none'` and `connect-src 'self'`, and uses system monospace fonts, so it makes no other requests. The e2e test checks that.
+The proxy serves only the page, `/auth`, `/token`, and `/ws`, so CSS and JS are inlined. Auth is in `src/terminal/auth.js`. The page sets a CSP with `default-src 'none'` and `connect-src 'self'`, and uses system monospace fonts, so it makes no other requests. The e2e test checks that.
 
 ### What grok does with the mouse
 
@@ -97,12 +134,13 @@ Chromium's device-scale emulation (Playwright's `deviceScaleFactor`) does not sc
 
 ## Tests
 
-`tests/unit/` runs under `node --test`: swipe-to-wheel mapping, slop, direction changes, tap and long-press, fling and decay, cell mapping, key sequences, sticky modifiers, OSC 52 decoding, and backoff.
+`tests/unit/` runs under `node --test`: swipe-to-wheel mapping, slop, direction changes, tap and long-press, fling and decay, cell mapping, key sequences, sticky modifiers, OSC 52 decoding, backoff, and `auth.js` (hash ticket parsing, ticket-for-key exchange, stored keys, refusal, network errors, and the `postMessage` ticket request with its origin and source checks).
 
-`tests/e2e/phone.mjs` drives the live test ttyd with a Pixel 7 in headless Chromium: CDP touch events for taps, swipes, flings, long press, and pinch; the key bar; resizing for the keyboard and rotation; OSC 52 with `tmux set-buffer -w`; the copy sheet; reconnect after closing the socket and after killing ttyd; and a desktop mouse wheel. It records websocket frames and compares `tmux capture-pane` before and after. Screenshots go to `GB_SHOTS` (default `/workspace/luci-app-grokbuild-shots`). It sends Esc, arrows, PgUp/PgDn, Ctrl+U, and Shift+Tab (then cycles grok's mode back), and never a prompt. `GB_FRESH=1` restarts grok in the pane first so its welcome screen, with the Changelog item to tap and scroll, is showing; only use it when grok is idle.
+`tests/router/run.sh` copies `proxy-lib.test.uc` to the router and runs it with ucode against the installed `proxy-lib.uc` (request parsing, PROXY lines, address ranges, header rewriting, origin checks, responses). It also runs `ctl.sh status` and `restart-session` against a throwaway tmux server (`GROKBUILD_SOCKET=grokbuild-test`, `GROKBUILD_COMMAND=/bin/true`), so the real grok session is never touched.
 
-## Plan
+`tests/e2e/auth.mjs` logs in through the LuCI form and checks the proxy over raw TLS: no access without a key, made-up keys, a client-sent `X-GrokBuild-User` or `PROXY` line, unknown, reused, and expired tickets, wrong or missing `Origin`, a working websocket that becomes a tmux client, nothing secret in `ps`, only stunnel on the port, the stock ttyd on 7681 still there, the WAN rule in `nft`, no old credential file, the boot link, and refusal after LuCI logout. `GB_SLOW=1` also waits for the 60 s recheck to close an open websocket.
 
-- Services > Grok Build in LuCI, embedding or linking the page.
-- procd init script and UCI config in place of `spike-ttyd.sh`, with one instance per listed interface.
-- LAN and Tailscale only, with `Block-GrokBuild-WAN` from uci-defaults.
+`tests/e2e/luci.mjs` uses a Pixel 7 in headless Chromium: LuCI form login, the menu entry, the framed terminal connecting and showing grok, the frame's size on a phone, the status line, a refused key replaced through `postMessage`, Restart grok's confirmation (dismissed), Restart service (the session survives and the frame reconnects), Full screen, the Settings tab, and logout.
+
+`tests/e2e/phone.mjs` drives the terminal page with a Pixel 7: it logs in to LuCI, takes a ticket, and opens `#t=<ticket>`. Then CDP touch events for taps, swipes, flings, long press, and pinch; the key bar; resizing for the keyboard and rotation; OSC 52 with `tmux set-buffer -w`; the copy sheet; reconnect after closing the socket and after killing ttyd (procd restarts it); and a desktop mouse wheel. It records websocket frames and compares `tmux capture-pane` before and after. Screenshots go to `GB_SHOTS` (default `/workspace/luci-app-grokbuild-shots`). It sends Esc, arrows, PgUp/PgDn, Ctrl+U, and Shift+Tab (then cycles grok's mode back), and never a prompt. The Shift+Tab check reads grok's mode label, which only shows on some grok screens. `GB_FRESH=1` restarts grok in the pane first so its welcome screen, with the Changelog item to tap and scroll, is showing; only use it when grok is idle.
+
