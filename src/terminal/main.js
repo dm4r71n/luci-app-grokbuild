@@ -1,5 +1,6 @@
-// Grok Build terminal page for ttyd -I. Everything is bundled into one HTML
-// file by tools/build.mjs; the page makes no requests except /token and /ws.
+// Grok Build terminal page. Everything is bundled into one HTML file by
+// tools/build.mjs; the page makes no requests except /auth, /token and /ws,
+// all to the Grok Build proxy that serves it.
 
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
@@ -10,6 +11,7 @@ import { SwipeScroller, sgrWheel, sgrClick, cellAt, WHEEL_UP } from './swipe.js'
 import { keySequence, applyMods, Sticky } from './keys.js';
 import { decodeOsc52 } from './osc52.js';
 import { TtydConnection } from './ttyd.js';
+import { Auth, ticketFromHash, sessionStore, parentTicket } from './auth.js';
 
 const $ = (s) => document.querySelector(s);
 const app = $('#app');
@@ -91,8 +93,25 @@ if (ta) {
 }
 
 // ---------- connection ----------
+// A ticket in the fragment comes from LuCI. Drop it from the address bar and
+// history straight away; it works only once anyway.
+const hashTicket = ticketFromHash(location.hash);
+if (hashTicket) history.replaceState(null, '', location.pathname + location.search);
+const framed = window.parent !== window;
+// Tell a framing LuCI page that the page loaded (so it hides its certificate
+// hint). Nothing secret, and its origin is not known here.
+if (framed) window.parent.postMessage({ grokbuild: 'loaded' }, '*');
+const base = new URL('./', location.href).href;
+const auth = new Auth({
+	base,
+	store: sessionStore(window.sessionStorage),
+	fetch: (...a) => fetch(...a),
+	requestTicket: () => parentTicket(window),
+	ticket: hashTicket,
+});
 const conn = new TtydConnection({
-	base: new URL('./', location.href).href,
+	base,
+	auth,
 	size: () => ({ columns: term.cols, rows: term.rows }),
 	onOutput: (data, done) => term.write(data, done),
 	onTitle: () => {},
@@ -138,11 +157,13 @@ function status(s, ms) {
 		tick();
 		countdown = setInterval(tick, 500);
 	} else if (s === 'auth') {
-		pill.textContent = 'sign-in needed · tap to reload';
+		pill.textContent = framed ? 'LuCI sign-in needed · tap to retry' : 'open from LuCI · tap';
 	}
 }
 pill.addEventListener('click', () => {
-	if (pill.classList.contains('auth')) location.reload();
+	if (pill.classList.contains('auth') && !framed)
+		location.href = `https://${location.hostname.includes(':') ? '[' + location.hostname + ']' : location.hostname}/cgi-bin/luci/admin/services/grokbuild/terminal`;
+	else if (pill.classList.contains('auth')) conn.connect();
 	else conn.kick();
 });
 

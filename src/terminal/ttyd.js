@@ -2,17 +2,19 @@
 // Client -> server: '0' input, '1' resize JSON, '2' pause, '3' resume,
 //                   and a first message that is JSON {AuthToken, columns, rows}.
 // Server -> client: '0' output, '1' window title, '2' preferences JSON.
-// Basic auth is checked on the websocket upgrade too; the browser sends the
-// cached credential for same-origin requests.
+// The Grok Build proxy in front of ttyd checks the key from auth.js on /token
+// and /ws and adds the header ttyd -H trusts; ttyd's own AuthToken is empty.
 
 import { backoff } from './backoff.js';
+import { wsUrl } from './auth.js';
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
 export class TtydConnection {
-	constructor({ base, onOutput, onTitle, onStatus, size }) {
+	constructor({ base, auth, onOutput, onTitle, onStatus, size }) {
 		this.base = base;            // e.g. https://host:7682/
+		this.auth = auth;            // Auth from auth.js
 		this.onOutput = onOutput;    // (Uint8Array, done) => void
 		this.onTitle = onTitle || (() => {});
 		this.onStatus = onStatus || (() => {});
@@ -42,20 +44,24 @@ export class TtydConnection {
 			try { old.close(); } catch {}
 		}
 		this.onStatus('connecting');
-		let token = '';
+		let key = null;
 		try {
-			const r = await fetch(new URL('token', this.base), { cache: 'no-store', credentials: 'same-origin' });
-			if (r.status === 401) { this.onStatus('auth'); return; }
-			if (!r.ok) throw new Error('token ' + r.status);
-			token = (await r.json()).token || '';
+			key = await this.auth.key();
+			if (gen !== this.generation) return;
+			if (key) {
+				const r = await fetch(new URL('token', this.base), {
+					cache: 'no-store', credentials: 'omit', headers: { 'X-GrokBuild-Key': key },
+				});
+				if (r.status === 401) key = await this.auth.key(true);
+				else if (!r.ok) throw new Error('token ' + r.status);
+			}
 		} catch (e) {
 			if (gen === this.generation) this._retry();
 			return;
 		}
 		if (gen !== this.generation) return;
-		const url = new URL('ws', this.base);
-		url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-		const ws = new WebSocket(url.href, ['tty']);
+		if (!key) { this.onStatus('auth'); return; }
+		const ws = new WebSocket(wsUrl(this.base, key), ['tty']);
 		ws.binaryType = 'arraybuffer';
 		this.ws = ws;
 		this.paused = false;
@@ -63,7 +69,7 @@ export class TtydConnection {
 		ws.onopen = () => {
 			this.openedAt = Date.now();
 			const { columns, rows } = this.size();
-			ws.send(enc.encode(JSON.stringify({ AuthToken: token, columns, rows })));
+			ws.send(enc.encode(JSON.stringify({ AuthToken: '', columns, rows })));
 			this.onStatus('open');
 		};
 		ws.onmessage = (ev) => this._message(ev.data);

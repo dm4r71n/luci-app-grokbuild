@@ -1,5 +1,5 @@
-// Bundle src/terminal into one self-contained HTML file for `ttyd -I`.
-// ttyd serves only that file, /token, and /ws, so nothing can be a separate asset.
+// Bundle src/terminal into one self-contained HTML file. The Grok Build proxy
+// serves only that file, /auth, /token, and /ws, so nothing can be a separate asset.
 import { build } from 'esbuild';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
