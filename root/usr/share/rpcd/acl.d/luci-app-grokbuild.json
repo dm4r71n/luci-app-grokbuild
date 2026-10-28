@@ -1,0 +1,17 @@
+{
+	"luci-app-grokbuild": {
+		"description": "Grant access to the Grok Build terminal",
+		"read": {
+			"ubus": {
+				"grokbuild": [ "status" ]
+			},
+			"uci": [ "grokbuild" ]
+		},
+		"write": {
+			"ubus": {
+				"grokbuild": [ "ticket", "restart_session", "restart_service" ]
+			},
+			"uci": [ "grokbuild" ]
+		}
+	}
+}
