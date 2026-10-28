@@ -5,7 +5,11 @@
   "scripts": {
     "build": "node tools/build.mjs",
     "test": "node --test tests/unit/",
-    "e2e": "node tests/e2e/phone.mjs"
+    "test:router": "sh tests/router/run.sh",
+    "e2e": "node tests/e2e/auth.mjs && node tests/e2e/luci.mjs && node tests/e2e/phone.mjs",
+    "e2e:auth": "node tests/e2e/auth.mjs",
+    "e2e:luci": "node tests/e2e/luci.mjs",
+    "e2e:phone": "node tests/e2e/phone.mjs"
   },
   "devDependencies": {
     "@xterm/addon-canvas": "^0.7.0",

@@ -1,17 +1,21 @@
-// End-to-end check of the terminal page against the live test ttyd, with a
-// Pixel 7 emulated in headless Chromium. Needs .spike-credential and ssh access
-// to the router (for tmux capture-pane). Sends only keys that do not submit a
-// prompt: taps, wheel, Esc, arrows, Ctrl+U.
+// End-to-end check of the terminal page against the live service, with a
+// Pixel 7 emulated in headless Chromium. Logs in to LuCI with OPENWRT_PASSWORD
+// (never printed), takes a ticket like the LuCI page does, and opens the
+// terminal at #t=<ticket>. Needs ssh access to the router (for tmux
+// capture-pane). Sends only keys that do not submit a prompt: taps, wheel,
+// Esc, arrows, Ctrl+U.
 //
-//   GB_URL=https://100.104.188.37:7682/ GB_SSH="ssh root@router" node tests/e2e/phone.mjs
+//   OPENWRT_PASSWORD=... GB_URL=https://100.104.188.37:7682/ GB_SSH="ssh root@router" node tests/e2e/phone.mjs
 import { chromium, devices } from 'playwright';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, mkdirSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 
 const URL_ = process.env.GB_URL || 'https://100.104.188.37:7682/';
 const SSH = (process.env.GB_SSH || 'ssh -o BatchMode=yes -o UserKnownHostsFile=/workspace/.ssh/known_hosts -i /workspace/.ssh/openwrt root@100.104.188.37').split(' ');
 const SHOTS = process.env.GB_SHOTS || '/workspace/luci-app-grokbuild-shots';
-const [username, password] = readFileSync(new URL('../../.spike-credential', import.meta.url), 'utf8').trim().split(/:(.*)/s);
+const PASSWORD = process.env.OPENWRT_PASSWORD;
+if (!PASSWORD) { console.error('OPENWRT_PASSWORD is not set'); process.exit(2); }
+const HOST = new URL(URL_).hostname;
 mkdirSync(SHOTS, { recursive: true });
 
 const results = [];
@@ -30,9 +34,19 @@ const browser = await chromium.launch({ args: ['--enable-unsafe-swiftshader', '-
 async function openPage(ctxOpts) {
 	const ctx = await browser.newContext({
 		...ctxOpts,
-		httpCredentials: { username, password },
 		ignoreHTTPSErrors: true,
 	});
+	// Log in to LuCI and take a ticket, as Services > Grok Build does.
+	await ctx.request.post(`https://${HOST}/cgi-bin/luci/`, {
+		form: { luci_username: 'root', luci_password: PASSWORD }, maxRedirects: 0,
+	});
+	const sid = (await ctx.cookies(`https://${HOST}/cgi-bin/luci/`)).find((c) => c.name === 'sysauth_https')?.value;
+	if (!sid) throw new Error('LuCI login failed');
+	const tr = await ctx.request.post(`https://${HOST}/ubus`, {
+		data: { jsonrpc: '2.0', id: 1, method: 'call', params: [sid, 'grokbuild', 'ticket', {}] },
+	});
+	const ticket = (await tr.json()).result?.[1]?.ticket;
+	if (!ticket) throw new Error('no ticket');
 	await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: new URL(URL_).origin });
 	// Chromium's device-scale emulation does not scale ResizeObserver's
 	// devicePixelContentBoxSize, so xterm's WebGL and canvas renderers draw at
@@ -55,7 +69,7 @@ async function openPage(ctxOpts) {
 		ws.on('framesent', (f) => sent.push(Buffer.isBuffer(f.payload) ? f.payload.toString('utf8') : String(f.payload)));
 	});
 	page.on('pageerror', (e) => console.log('pageerror', e.message));
-	await page.goto(URL_);
+	await page.goto(URL_ + '#t=' + ticket);
 	await page.waitForFunction(() => window.__gb && window.__gb.conn.open, null, { timeout: 15000 });
 	await page.waitForFunction(() => /Grok|❯/.test(window.__gb.screenText()), null, { timeout: 15000 });
 	await sleep(800);
@@ -106,6 +120,8 @@ if (process.env.GB_FRESH === '1') {
 // ---------------- phone ----------------
 const phone = await openPage({ ...devices['Pixel 7'] });
 const { page, sent, sockets } = phone;
+check('ticket is gone from the address bar', !page.url().includes('#t='), page.url());
+check('key kept in sessionStorage only', await page.evaluate(() => /^[0-9a-f]{32}$/.test(sessionStorage.getItem('grokbuild.key') || '') && !document.cookie));
 const touch = await touchCtl(page);
 
 check('page uses only its own origin', phone.external.length === 0, phone.external.join(', '));
@@ -367,13 +383,13 @@ console.log('--- pane after keys ---\n' + capture().split('\n').filter((l) => l.
 	check('same tmux session after reconnect', tmux('display -p -t grok "#{session_created}"').trim() === created);
 	check('screen redrawn after reconnect', /❯|Grok/.test(await page.evaluate(() => window.__gb.screenText())));
 
-	router('kill $(ps w | grep "[t]tyd -p 7682" | awk \'{print $1}\')');
+	router('kill $(ps w | grep "[t]tyd -i /var/run/grokbuild" | awk \'{print $1}\')');
 	await page.waitForFunction(() => !window.__gb.conn.open, null, { timeout: 5000 });
 	await page.screenshot({ path: `${SHOTS}/07-phone-reconnecting.png` });
 	const t0 = Date.now();
 	await page.waitForFunction(() => window.__gb.conn.open, null, { timeout: 30000 });
 	await sleep(1500);
-	check('reconnects after ttyd is killed and the supervisor restarts it', true, `${((Date.now() - t0) / 1000).toFixed(1)}s`);
+	check('reconnects after ttyd is killed and procd restarts it', true, `${((Date.now() - t0) / 1000).toFixed(1)}s`);
 	check('same tmux session after ttyd restart', tmux('display -p -t grok "#{session_created}"').trim() === created);
 	check('grok still running', paneInfo().includes(' grok '), paneInfo());
 }
